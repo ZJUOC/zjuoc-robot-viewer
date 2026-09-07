@@ -18,13 +18,17 @@ import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment
 import { createDetailedRobot } from "./DetailedRobot";
 import { createThrusterEffects } from "./ThrusterEffects";
 import { createPool } from "./Pool";
+import { movementLean } from "./MotionAttitude";
+import { waterSway } from "./WaterSway";
+import { ControlKeyboard } from "./ControlKeyboard";
+import { thrusterCommand } from "./ThrusterCommand";
 import styles from "./robot-viewer.module.css";
 
-type SelectedPart = { name: string; note: string };
+type Telemetry = { position:number[]; speed:number[] };
 
 // The reference-derived assembly lives in DetailedRobot.ts.
 
-function Scene({ onSelect, motionMode }: { onSelect: (part: SelectedPart) => void; motionMode:boolean }) {
+function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Telemetry)=>void; motionMode:boolean; onInput:(keys:string[])=>void }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const motionRef=useRef(motionMode);
   useEffect(()=>{motionRef.current=motionMode;},[motionMode]);
@@ -90,27 +94,43 @@ function Scene({ onSelect, motionMode }: { onSelect: (part: SelectedPart) => voi
     const unitsPerMeter=robotSize.z/.4;
     const pool=createPool(unitsPerMeter);
     scene.add(pool.group);
+    // Pool coordinates: near-left bottom corner; X right, Y away, Z up.
+    const origin=new THREE.Vector3(-pool.width/2,pool.bottom,pool.length/2);
+    for(const [direction,color] of [[new THREE.Vector3(1,0,0),0xf07b70],[new THREE.Vector3(0,0,-1),0x8feb8f],[new THREE.Vector3(0,1,0),0x7eaaff]] as const){
+      const arrow=new THREE.ArrowHelper(direction,origin.clone().add(new THREE.Vector3(.05,.05,-.05)),unitsPerMeter*.3,color,.5,.25);
+      scene.add(arrow);
+    }
     // Conservative clearance includes the complete pod rotation envelope.
     const clearance=Math.hypot(robotSize.x,robotSize.z)/2+.5;
     const limitX=pool.width/2-clearance,limitZ=pool.length/2-clearance;
     const bodyBounds=new THREE.Box3().setFromObject(robot);
-    const minY=pool.bottom-bodyBounds.min.y+.3,maxY=pool.top-bodyBounds.max.y-.3;
+    const tiltMargin=clearance*Math.sin(THREE.MathUtils.degToRad(10))+.0045*unitsPerMeter;
+    const minY=pool.bottom-bodyBounds.min.y+.3+tiltMargin,maxY=pool.top-bodyBounds.max.y-.3-tiltMargin;
     const pivots:THREE.Object3D[]=[];
     robot.traverse(o=>{if(o.userData.motionPivot)pivots.push(o);});
     scene.add(robot);
     const thrusterEffects=createThrusterEffects(pivots,window.innerWidth<700);
     scene.add(thrusterEffects.points);
+    const powers=pivots.map(()=>0),basis=new THREE.Vector3(),podDirection=new THREE.Vector3(),radial=new THREE.Vector3(),frameRotation=new THREE.Quaternion();
+    let lastTelemetryTime=-1;
+    const previousPosition=robot.position.clone();
+    const measuredVelocity=new THREE.Vector3();
     const keys=new Set<string>();
     const rawKeys=new Set<string>();
     const pendingInputs:{at:number;keys:string[]}[]=[];
     const queueInput=(code:string,down:boolean)=>{
       if(rawKeys.has(code)===down)return;
       if(down)rawKeys.add(code);else rawKeys.delete(code);
+      onInput([...rawKeys]);
       pendingInputs.push({at:performance.now()+1000,keys:[...rawKeys]});
     };
     let yawVelocity=0;
+    let heading=Math.PI;
+    const lean=new THREE.Quaternion(),targetLean=new THREE.Quaternion(),yaw=new THREE.Quaternion();
+    const swayRotation=new THREE.Quaternion(),swayEuler=new THREE.Euler(0,0,0,'XYZ');
+    let swayStrength=0,previousHeave=0;
     const velocity=new THREE.Vector3(),forward=new THREE.Vector3(),right=new THREE.Vector3(),desired=new THREE.Vector3(),displacement=new THREE.Vector3();
-    const clearKeys=()=>{keys.clear();rawKeys.clear();pendingInputs.length=0;};
+    const clearKeys=()=>{keys.clear();if(rawKeys.size){rawKeys.clear();onInput([]);}pendingInputs.length=0;};
     const keyboard=(event:KeyboardEvent)=>{
       if(!['KeyW','KeyA','KeyS','KeyD','KeyJ','KeyK','ShiftLeft','ShiftRight','ControlLeft','ControlRight'].includes(event.code))return;
       if(event.type==='keyup'){queueInput(event.code,false);return;}
@@ -161,7 +181,6 @@ function Scene({ onSelect, motionMode }: { onSelect: (part: SelectedPart) => voi
       if (hit?.object instanceof THREE.Mesh) {
         selectedMaterials.set(hit.object, hit.object.material as THREE.Material);
         hit.object.material = new THREE.MeshStandardMaterial({ color: 0x46e5db, emissive: 0x0b625f, emissiveIntensity: 0.5 });
-        onSelect({ name: hit.object.userData.partName, note: hit.object.userData.partNote });
       }
     };
     const preventMenu = (event: MouseEvent) => event.preventDefault();
@@ -190,6 +209,9 @@ function Scene({ onSelect, motionMode }: { onSelect: (part: SelectedPart) => voi
       const dt=Math.min(elapsed-previousTime,.05);
       const step=dt*Math.PI/1.5;
       previousTime=elapsed;
+      // Remove last frame's visual heave before integrating real displacement.
+      // The camera follows travel, not the small wave oscillations.
+      robot.position.y-=previousHeave;
       const inputTime=performance.now();
       while(pendingInputs.length&&pendingInputs[0].at<=inputTime){
         const input=pendingInputs.shift()!;keys.clear();input.keys.forEach(code=>keys.add(code));
@@ -206,7 +228,7 @@ function Scene({ onSelect, motionMode }: { onSelect: (part: SelectedPart) => voi
         const turn=Number(keys.has('KeyJ'))-Number(keys.has('KeyK'));
         yawVelocity=THREE.MathUtils.damp(yawVelocity,turn*Math.PI/3,turn?6:9,dt);
         if(Math.abs(yawVelocity)<.0001)yawVelocity=0;
-        robot.rotation.y=THREE.MathUtils.euclideanModulo(robot.rotation.y+yawVelocity*dt,Math.PI*2);
+        heading=THREE.MathUtils.euclideanModulo(heading+yawVelocity*dt,Math.PI*2);
         velocity.lerp(desired,1-Math.exp(-(desired.lengthSq()>0?3.5:1.8)*dt));
         if(velocity.lengthSq()<1e-7)velocity.set(0,0,0);
         displacement.copy(velocity).multiplyScalar(dt);
@@ -219,14 +241,44 @@ function Scene({ onSelect, motionMode }: { onSelect: (part: SelectedPart) => voi
         robot.position.add(displacement);camera.position.add(displacement);controls.target.add(displacement);
         key.position.add(displacement);key.target.position.copy(robot.position);key.target.updateMatrixWorld();
         rim.position.add(displacement);
-      }else{clearKeys();velocity.set(0,0,0);yawVelocity=0;}
-      for(const pivot of pivots){
-        const target=motionRef.current?pivot.userData.motionAngle:pivot.userData.restAngle;
-        const difference=target-pivot.rotation.z;
-        pivot.rotation.z+=Math.sign(difference)*Math.min(Math.abs(difference),step);
-      }
+      }else{clearKeys();velocity.set(0,0,0);desired.set(0,0,0);yawVelocity=0;}
+      movementLean(velocity,targetLean);
+      lean.slerp(targetLean,1-Math.exp(-5*dt));
+      yaw.setFromAxisAngle(THREE.Object3D.DEFAULT_UP,heading);
+      const swayTarget=motionRef.current?Math.min(1,velocity.length()/4+Math.abs(yawVelocity)*.5):0;
+      swayStrength=THREE.MathUtils.damp(swayStrength,swayTarget,2.5,dt);
+      if(swayStrength<.0001)swayStrength=0;
+      const sway=waterSway(elapsed,swayStrength);
+      swayEuler.set(sway.pitch,0,sway.roll);
+      swayRotation.setFromEuler(swayEuler);
+      robot.quaternion.copy(lean).multiply(yaw).multiply(swayRotation);
+      const baseY=robot.position.y;
+      robot.position.y=THREE.MathUtils.clamp(baseY+sway.heave*unitsPerMeter,minY,maxY);
+      previousHeave=robot.position.y-baseY;
       robot.updateMatrixWorld(true);
-      thrusterEffects.update(dt,motionRef.current);
+      const turnInput=motionRef.current?Number(keys.has('KeyJ'))-Number(keys.has('KeyK')):0;
+      const horizontal=Math.hypot(desired.x,desired.z)>1e-5||turnInput!==0;
+      pivots.forEach((pivot,index)=>{
+        pivot.parent!.getWorldQuaternion(frameRotation);
+        basis.set(1,0,0).applyQuaternion(frameRotation);basis.y=0;basis.normalize();
+        podDirection.set(desired.x,0,desired.z);
+        if(turnInput){
+          pivot.getWorldPosition(radial).sub(robot.position);
+          podDirection.addScaledVector(new THREE.Vector3(radial.z,0,-radial.x),turnInput*2);
+        }
+        const command=thrusterCommand(horizontal,Math.sign(desired.y),podDirection.dot(basis),pivot.userData.motionAngle-Math.PI);
+        const difference=THREE.MathUtils.euclideanModulo(command.angle-pivot.rotation.z+Math.PI,Math.PI*2)-Math.PI;
+        pivot.rotation.z+=Math.sign(difference)*Math.min(Math.abs(difference),step);
+        powers[index]=command.power;
+      });
+      robot.updateMatrixWorld(true);
+      thrusterEffects.update(dt,powers);
+      if(dt>0)measuredVelocity.subVectors(robot.position,previousPosition).divideScalar(dt*unitsPerMeter);
+      previousPosition.copy(robot.position);
+      if(elapsed-lastTelemetryTime>=.1){
+        lastTelemetryTime=elapsed;
+        onTelemetry({position:[(robot.position.x+pool.width/2)/unitsPerMeter,(pool.length/2-robot.position.z)/unitsPerMeter,(robot.position.y-pool.bottom)/unitsPerMeter],speed:[measuredVelocity.x,-measuredVelocity.z,measuredVelocity.y]});
+      }
       bubbles.position.y = (elapsed * 0.09) % 3;
       controls.update();
       renderer.render(scene, camera);
@@ -266,22 +318,21 @@ function Scene({ onSelect, motionMode }: { onSelect: (part: SelectedPart) => voi
       });
       mount.removeChild(renderer.domElement);
     };
-  }, [onSelect]);
+  }, [onTelemetry,onInput]);
 
   return <div ref={mountRef} className={styles.canvas} />;
 }
 
 export function RobotViewer() {
+  const [pressed,setPressed]=useState<string[]>([]);
   const [motionMode,setMotionMode]=useState(false);
-  const [panelVisible, setPanelVisible] = useState(true);
-  const [selected, setSelected] = useState<SelectedPart>({
-    name: "整机姿态",
-    note: "初稿依据正视、俯视及旋转 180° 后的左视参考图建立。",
-  });
+  const [panelVisible, setPanelVisible] = useState(false);
+  const [telemetry,setTelemetry]=useState<Telemetry>({position:[1.5,2.5,.75],speed:[0,0,0]});
   const panelRef = useRef<HTMLDivElement>(null);
   const dragOffset = useRef({ x: 0, y: 0 });
 
   const startDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if(event.button!==0||(event.target as HTMLElement).closest('button'))return;
     if (window.innerWidth < 700 || !panelRef.current) return;
     const rect = panelRef.current.getBoundingClientRect();
     dragOffset.current = { x: event.clientX - rect.left, y: event.clientY - rect.top };
@@ -298,7 +349,7 @@ export function RobotViewer() {
 
   return (
     <main className={styles.viewer}>
-      <Scene onSelect={setSelected} motionMode={motionMode} />
+      <Scene onTelemetry={setTelemetry} motionMode={motionMode} onInput={setPressed} />
       <header className={styles.header}>
         <div className={styles.identity}>
           <span className={styles.logo}><CornersOut size={22} weight="bold" /></span>
@@ -319,41 +370,20 @@ export function RobotViewer() {
       </header>
 
       <div className={styles.status}><i /> 水下场景 <span>{motionMode?'延迟 1 秒 · WASD 平移 · Shift 上 / Ctrl 下 · J 左转 / K 右转':'展示模式 · 初始姿态'}</span></div>
-      {motionMode&&<div className={styles.swimPad} aria-label="平面移动方向键">
-        {[['ShiftLeft','上浮'],['ControlLeft','下潜'],['KeyJ','左转'],['KeyK','右转']].map(([code,label])=><button key={code} type="button" aria-label={label}
-          onPointerDown={e=>{e.preventDefault();e.currentTarget.setPointerCapture(e.pointerId);window.dispatchEvent(new CustomEvent('robot-move',{detail:{code,down:true}}));}}
-          onPointerUp={()=>window.dispatchEvent(new CustomEvent('robot-move',{detail:{code,down:false}}))}
-          onLostPointerCapture={()=>window.dispatchEvent(new CustomEvent('robot-move',{detail:{code,down:false}}))}
-          onPointerCancel={()=>window.dispatchEvent(new CustomEvent('robot-move',{detail:{code,down:false}}))}>{label}</button>)}
-        {['W','A','S','D'].map(letter=><button key={letter} type="button" aria-label={{W:'向前',A:'向左',S:'向后',D:'向右'}[letter]}
-          onPointerDown={e=>{e.preventDefault();e.currentTarget.setPointerCapture(e.pointerId);window.dispatchEvent(new CustomEvent('robot-move',{detail:{code:`Key${letter}`,down:true}}));}}
-          onPointerUp={()=>window.dispatchEvent(new CustomEvent('robot-move',{detail:{code:`Key${letter}`,down:false}}))}
-          onLostPointerCapture={()=>window.dispatchEvent(new CustomEvent('robot-move',{detail:{code:`Key${letter}`,down:false}}))}
-          onPointerCancel={()=>window.dispatchEvent(new CustomEvent('robot-move',{detail:{code:`Key${letter}`,down:false}}))}>{letter}</button>)}
-      </div>}
+      {motionMode&&<ControlKeyboard pressed={pressed} />}
 
       {panelVisible && (
-        <section ref={panelRef} className={styles.panel} aria-label="模型信息面板">
+        <section ref={panelRef} className={styles.panel} aria-label="机器人实时位置与速度">
           <div className={styles.panelHandle} onPointerDown={startDrag} onPointerMove={dragPanel}>
-            <span><HandGrabbing size={17} /> 模型信息</span>
-            <button type="button" onClick={() => setPanelVisible(false)} aria-label="关闭信息面板"><X size={17} /></button>
+            <span><HandGrabbing size={17} /> 位置与速度</span>
+            <button type="button" onPointerDown={event=>event.stopPropagation()} onClick={() => setPanelVisible(false)} aria-label="关闭信息面板"><X size={17} /></button>
           </div>
           <div className={styles.panelBody}>
-            <p className={styles.label}>当前部件</p>
-            <h1>{selected.name}</h1>
-            <p className={styles.note}>{selected.note}</p>
-            <div className={styles.separator} />
-            <p className={styles.label}>建模基准</p>
-            <dl className={styles.specs}>
-              <div><dt>推进器</dt><dd>四角布置</dd></div>
-              <div><dt>水池内尺寸</dt><dd>3 × 5 m</dd></div>
-              <div><dt>机器人长度</dt><dd>40 cm</dd></div>
-              <div><dt>池深（暂定）</dt><dd>1.5 m</dd></div>
-              <div><dt>池底砖缝</dt><dd>每格 10 cm</dd></div>
-              <div><dt>舵机轴线</dt><dd>XY 平面 45°</dd></div>
-              <div><dt>推进器姿态</dt><dd>{motionMode?'斜向前方':'初始姿态'}</dd></div>
-              <div><dt>视图校正</dt><dd>左视图旋转 180°</dd></div>
-            </dl>
+            <table className={styles.telemetryTable}>
+              <thead><tr><th>轴</th><th>位置 / m</th><th>速度 / m/s</th></tr></thead>
+              <tbody>{['X','Y','Z'].map((axis,i)=><tr key={axis}><th>{axis}</th><td>{telemetry.position[i].toFixed(3)}</td><td>{(Math.abs(telemetry.speed[i])<.0005?0:telemetry.speed[i]).toFixed(3)}</td></tr>)}</tbody>
+            </table>
+            <p className={styles.telemetryNote}>原点：水池近端左下角池底<br/>X 向右 · Y 沿池长向远端 · Z 向上<br/>显示机体中心位置与实际速度，负值表示反向。</p>
           </div>
         </section>
       )}
