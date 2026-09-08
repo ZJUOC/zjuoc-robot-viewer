@@ -22,6 +22,9 @@ import { movementLean } from "./MotionAttitude";
 import { waterSway } from "./WaterSway";
 import { ControlKeyboard } from "./ControlKeyboard";
 import { thrusterCommand } from "./ThrusterCommand";
+import { updateFollowCamera } from "./FollowCamera";
+import { createRaceCourse } from "./RaceCourse";
+import { createCourseCollision } from "./CourseCollision";
 import styles from "./robot-viewer.module.css";
 
 type Telemetry = { position:number[]; speed:number[] };
@@ -66,8 +69,8 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
     controls.target.set(0, 0, 0);
     controls.minDistance = 7;
     controls.maxDistance = 160;
-    controls.minPolarAngle = 0.18;
-    controls.maxPolarAngle = Math.PI - 0.15;
+    controls.minPolarAngle = 0;
+    controls.maxPolarAngle = Math.PI;
     controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
     controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
     controls.mouseButtons.RIGHT = undefined as unknown as THREE.MOUSE;
@@ -106,9 +109,16 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
     const bodyBounds=new THREE.Box3().setFromObject(robot);
     const tiltMargin=clearance*Math.sin(THREE.MathUtils.degToRad(10))+.0045*unitsPerMeter;
     const minY=pool.bottom-bodyBounds.min.y+.3+tiltMargin,maxY=pool.top-bodyBounds.max.y-.3-tiltMargin;
+    const course=createRaceCourse(unitsPerMeter,pool.bottom);
+    scene.add(course.group);
+    robot.position.copy(course.start);
+    camera.position.add(robot.position);controls.target.copy(robot.position);controls.update();
+    key.position.add(robot.position);key.target.position.copy(robot.position);key.target.updateMatrixWorld();rim.position.add(robot.position);
     const pivots:THREE.Object3D[]=[];
     robot.traverse(o=>{if(o.userData.motionPivot)pivots.push(o);});
     scene.add(robot);
+    const collision=createCourseCollision(robot,course.colliders,unitsPerMeter);
+    const previousRotation=robot.quaternion.clone(),collisionCorrection=new THREE.Vector3();
     const thrusterEffects=createThrusterEffects(pivots,window.innerWidth<700);
     scene.add(thrusterEffects.points);
     const powers=pivots.map(()=>0),basis=new THREE.Vector3(),podDirection=new THREE.Vector3(),radial=new THREE.Vector3(),frameRotation=new THREE.Quaternion();
@@ -126,20 +136,54 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
     };
     let yawVelocity=0;
     let heading=Math.PI;
+    let wasMotion=false;
+    let followZoom=1,lastFollowDistance=0;
+    const displayOffset=camera.position.clone().sub(robot.position),displayTarget=new THREE.Vector3(),followCenter=new THREE.Vector3();
+    const follow=()=>{
+      followCenter.copy(robot.position);followCenter.y-=previousHeave;
+      updateFollowCamera(camera,followCenter,heading,controls.target,followZoom);
+      lastFollowDistance=camera.position.distanceTo(controls.target);
+    };
+    const trackZoom=()=>{
+      if(!motionRef.current||!wasMotion||lastFollowDistance===0)return;
+      const distance=camera.position.distanceTo(controls.target);
+      followZoom=THREE.MathUtils.clamp(followZoom*distance/lastFollowDistance,.45,4);
+      lastFollowDistance=distance;
+    };
+    controls.addEventListener('change',trackZoom);
     const lean=new THREE.Quaternion(),targetLean=new THREE.Quaternion(),yaw=new THREE.Quaternion();
     const swayRotation=new THREE.Quaternion(),swayEuler=new THREE.Euler(0,0,0,'XYZ');
     let swayStrength=0,previousHeave=0;
     const velocity=new THREE.Vector3(),forward=new THREE.Vector3(),right=new THREE.Vector3(),desired=new THREE.Vector3(),displacement=new THREE.Vector3();
     const clearKeys=()=>{keys.clear();if(rawKeys.size){rawKeys.clear();onInput([]);}pendingInputs.length=0;};
+    const returnToStart=()=>{
+      clearKeys();velocity.set(0,0,0);desired.set(0,0,0);yawVelocity=0;
+      heading=Math.PI;swayStrength=0;previousHeave=0;
+      lean.identity();targetLean.identity();swayRotation.identity();
+      displacement.subVectors(course.start,robot.position);
+      robot.position.copy(course.start);robot.rotation.set(0,heading,0);
+      previousPosition.copy(robot.position);previousRotation.copy(robot.quaternion);
+      measuredVelocity.set(0,0,0);
+      pivots.forEach(p=>p.rotation.z=Math.PI);powers.fill(0);
+      robot.updateMatrixWorld(true);
+      key.position.add(displacement);rim.position.add(displacement);
+      key.target.position.copy(robot.position);key.target.updateMatrixWorld();
+      if(motionRef.current)follow();
+      else {camera.position.add(displacement);controls.target.add(displacement);controls.update();}
+      onTelemetry({position:[(robot.position.x+pool.width/2)/unitsPerMeter,(pool.length/2-robot.position.z)/unitsPerMeter,(robot.position.y-pool.bottom)/unitsPerMeter],speed:[0,0,0]});
+    };
     const keyboard=(event:KeyboardEvent)=>{
-      if(!['KeyW','KeyA','KeyS','KeyD','KeyJ','KeyK','ShiftLeft','ShiftRight','ControlLeft','ControlRight'].includes(event.code))return;
-      if(event.type==='keyup'){queueInput(event.code,false);return;}
+      if(!['KeyP','KeyW','KeyA','KeyS','KeyD','KeyJ','KeyK','Space','ShiftLeft','ShiftRight'].includes(event.code))return;
+      if(event.type==='keyup'){if(event.code!=='KeyP')queueInput(event.code,false);return;}
       const el=event.target as HTMLElement;
-      if(el?.closest('input,textarea,select,[contenteditable="true"]')||event.metaKey||event.altKey)return;
+      if(el?.closest('input,textarea,select,[contenteditable="true"]')||event.metaKey||event.ctrlKey||event.altKey)return;
+      if(event.repeat)return;
+      if(event.code==='KeyP'){event.preventDefault();returnToStart();return;}
       if(motionRef.current){event.preventDefault();queueInput(event.code,true);}
     };
     const touchInput=(event:Event)=>{
       const {code,down}=(event as CustomEvent<{code:string;down:boolean}>).detail;
+      if(code==='KeyP'){if(down)returnToStart();return;}
       if(down&&motionRef.current)queueInput(code,true);else queueInput(code,false);
     };
     window.addEventListener('keydown',keyboard);window.addEventListener('keyup',keyboard);
@@ -170,6 +214,7 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
       selectedMaterials.clear();
     };
     const inspectPart = (event: PointerEvent) => {
+      if(motionRef.current)return;
       if (event.button !== 2) return;
       event.preventDefault();
       const rect = renderer.domElement.getBoundingClientRect();
@@ -209,6 +254,22 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
       const dt=Math.min(elapsed-previousTime,.05);
       const step=dt*Math.PI/1.5;
       previousTime=elapsed;
+      previousRotation.copy(robot.quaternion);
+      const previousHeading=heading;
+      if(wasMotion!==motionRef.current){
+        if(motionRef.current){
+          displayOffset.subVectors(camera.position,robot.position);
+          displayTarget.subVectors(controls.target,robot.position);
+          controls.enableDamping=false;controls.update();
+          controls.enabled=true;controls.enableRotate=false;controls.enablePan=false;controls.enableZoom=true;
+          clearSelection();
+        }else{
+          camera.position.copy(robot.position).add(displayOffset);
+          controls.target.copy(robot.position).add(displayTarget);
+          controls.enabled=true;controls.enableRotate=true;controls.enablePan=true;controls.enableDamping=true;controls.update();
+        }
+        wasMotion=motionRef.current;
+      }
       // Remove last frame's visual heave before integrating real displacement.
       // The camera follows travel, not the small wave oscillations.
       robot.position.y-=previousHeave;
@@ -218,17 +279,16 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
       }
       // User XY plane maps to Three.js XZ; Y remains depth/height.
       if(motionRef.current){
-        forward.subVectors(controls.target,camera.position);forward.y=0;
-        if(forward.lengthSq()<1e-6)forward.set(0,0,-1);else forward.normalize();
-        right.crossVectors(forward,THREE.Object3D.DEFAULT_UP).normalize();
-        desired.copy(forward).multiplyScalar(Number(keys.has('KeyW'))-Number(keys.has('KeyS')));
-        desired.addScaledVector(right,Number(keys.has('KeyD'))-Number(keys.has('KeyA')));
-        if(desired.lengthSq()>0)desired.normalize().multiplyScalar(12);
-        desired.y=(Number(keys.has('ShiftLeft')||keys.has('ShiftRight'))-Number(keys.has('ControlLeft')||keys.has('ControlRight')))*8;
         const turn=Number(keys.has('KeyJ'))-Number(keys.has('KeyK'));
         yawVelocity=THREE.MathUtils.damp(yawVelocity,turn*Math.PI/3,turn?6:9,dt);
         if(Math.abs(yawVelocity)<.0001)yawVelocity=0;
         heading=THREE.MathUtils.euclideanModulo(heading+yawVelocity*dt,Math.PI*2);
+        forward.set(Math.sin(heading),0,Math.cos(heading));
+        right.crossVectors(forward,THREE.Object3D.DEFAULT_UP).normalize();
+        desired.copy(forward).multiplyScalar(Number(keys.has('KeyW'))-Number(keys.has('KeyS')));
+        desired.addScaledVector(right,Number(keys.has('KeyD'))-Number(keys.has('KeyA')));
+        if(desired.lengthSq()>0)desired.normalize().multiplyScalar(12);
+        desired.y=(Number(keys.has('Space'))-Number(keys.has('ShiftLeft')||keys.has('ShiftRight')))*8;
         velocity.lerp(desired,1-Math.exp(-(desired.lengthSq()>0?3.5:1.8)*dt));
         if(velocity.lengthSq()<1e-7)velocity.set(0,0,0);
         displacement.copy(velocity).multiplyScalar(dt);
@@ -238,7 +298,7 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
         if(nextY<=minY||nextY>=maxY)velocity.y=0;
         if(Math.abs(nextX)>=limitX)velocity.x=0;if(Math.abs(nextZ)>=limitZ)velocity.z=0;
         displacement.set(nextX-robot.position.x,nextY-robot.position.y,nextZ-robot.position.z);
-        robot.position.add(displacement);camera.position.add(displacement);controls.target.add(displacement);
+        robot.position.add(displacement);
         key.position.add(displacement);key.target.position.copy(robot.position);key.target.updateMatrixWorld();
         rim.position.add(displacement);
       }else{clearKeys();velocity.set(0,0,0);desired.set(0,0,0);yawVelocity=0;}
@@ -255,6 +315,16 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
       const baseY=robot.position.y;
       robot.position.y=THREE.MathUtils.clamp(baseY+sway.heave*unitsPerMeter,minY,maxY);
       previousHeave=robot.position.y-baseY;
+      collisionCorrection.copy(robot.position);
+      const fraction=collision.resolve(previousPosition,previousRotation,robot.position,robot.quaternion);
+      if(fraction<1){
+        const delta=THREE.MathUtils.euclideanModulo(heading-previousHeading+Math.PI,Math.PI*2)-Math.PI;
+        heading=previousHeading+delta*fraction;
+        velocity.set(0,0,0);yawVelocity=0;previousHeave=0;
+        collisionCorrection.subVectors(robot.position,collisionCorrection);
+        key.position.add(collisionCorrection);rim.position.add(collisionCorrection);
+        key.target.position.copy(robot.position);key.target.updateMatrixWorld();
+      }
       robot.updateMatrixWorld(true);
       const turnInput=motionRef.current?Number(keys.has('KeyJ'))-Number(keys.has('KeyK')):0;
       const horizontal=Math.hypot(desired.x,desired.z)>1e-5||turnInput!==0;
@@ -280,18 +350,19 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
         onTelemetry({position:[(robot.position.x+pool.width/2)/unitsPerMeter,(pool.length/2-robot.position.z)/unitsPerMeter,(robot.position.y-pool.bottom)/unitsPerMeter],speed:[measuredVelocity.x,-measuredVelocity.z,measuredVelocity.y]});
       }
       bubbles.position.y = (elapsed * 0.09) % 3;
-      controls.update();
+      if(motionRef.current)follow();else controls.update();
       renderer.render(scene, camera);
     };
     animate();
 
     const resetView = () => {
+      if(motionRef.current){followZoom=1;follow();return;}
       camera.position.copy(robot.position).add(new THREE.Vector3(10.5,7.2,11.5));
       controls.target.copy(robot.position);
       controls.update();
     };
     window.addEventListener("robot-reset-view", resetView);
-    const poolView=()=>{camera.position.set(pool.width*.65,pool.length*.85,pool.length*.85);controls.target.set(0,0,0);controls.update();};
+    const poolView=()=>{if(motionRef.current)return;camera.position.set(pool.width*.65,pool.length*.85,pool.length*.85);controls.target.set(0,0,0);controls.update();};
     window.addEventListener('robot-pool-view',poolView);
 
     return () => {
@@ -302,6 +373,7 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
       observer.disconnect();
       window.removeEventListener("robot-reset-view", resetView);
       window.removeEventListener('robot-pool-view',poolView);
+      controls.removeEventListener('change',trackZoom);
       renderer.domElement.removeEventListener("pointerdown", inspectPart);
       renderer.domElement.removeEventListener("contextmenu", preventMenu);
       clearSelection();
@@ -309,6 +381,7 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
       renderer.dispose();
       environment.dispose();
       thrusterEffects.dispose();
+      course.dispose();
       scene.traverse((object) => {
         if (object instanceof THREE.Mesh || object instanceof THREE.Points) {
           object.geometry?.dispose();
@@ -356,7 +429,7 @@ export function RobotViewer() {
           <div><strong>水下机器人</strong><small>三视图重建 · 装配模型 02</small></div>
         </div>
         <div className={styles.headerActions}>
-          <button className={styles.modeButton} type="button" onClick={()=>window.dispatchEvent(new Event('robot-pool-view'))}>水池全景</button>
+          <button className={styles.modeButton} type="button" disabled={motionMode} title={motionMode?'展示模式可查看全景':'查看水池全景'} onClick={()=>window.dispatchEvent(new Event('robot-pool-view'))}>水池全景</button>
           <button className={styles.modeButton} type="button" aria-pressed={motionMode} onClick={()=>setMotionMode(v=>!v)}>
             {motionMode?'运动模式':'展示模式'}
           </button>
@@ -369,7 +442,7 @@ export function RobotViewer() {
         </div>
       </header>
 
-      <div className={styles.status}><i /> 水下场景 <span>{motionMode?'延迟 1 秒 · WASD 平移 · Shift 上 / Ctrl 下 · J 左转 / K 右转':'展示模式 · 初始姿态'}</span></div>
+      <div className={styles.status}><i /> 水下场景 <span>{motionMode?'跟随视角 · 延迟 1 秒 · Space 上 / Shift 下 · J/K 转向':'展示模式 · 自由视角'}</span></div>
       {motionMode&&<ControlKeyboard pressed={pressed} />}
 
       {panelVisible && (
@@ -388,13 +461,13 @@ export function RobotViewer() {
         </section>
       )}
 
-      <aside className={styles.help} aria-label="操作说明">
+      {!motionMode&&<aside className={styles.help} aria-label="操作说明">
         <div><MouseLeftClick size={19} /><span>左键拖动<small>旋转视角</small></span></div>
         <div><MouseMiddleClick size={19} /><span>中键拖动<small>平移画面</small></span></div>
         <div><MouseRightClick size={19} /><span>右键部件<small>查看说明</small></span></div>
         <div className={styles.wheel}><span>⌁</span><span>滚动滚轮<small>缩放视图</small></span></div>
-      </aside>
-      <p className={styles.touchHint}>单指旋转 · 双指缩放与平移</p>
+      </aside>}
+      {!motionMode&&<p className={styles.touchHint}>单指旋转 · 双指缩放与平移</p>}
     </main>
   );
 }

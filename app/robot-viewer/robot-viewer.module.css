@@ -136,7 +136,8 @@
 .swimPad button small {font-size:11px;color:#99bdc7;}
 .swimPad button[aria-pressed="true"] {background:#70f1ec;color:#062932;border-color:#c1fffa;box-shadow:0 0 14px #70f1ec55;transform:translateY(1px);}
 .swimPad button[aria-pressed="true"] small {color:#174c54;}
-.keyboardNote {grid-row:3 / 5;grid-column:3 / 8;align-self:center;margin:0 0 0 8px;font-size:12px;color:#8eb3bd;line-height:1.7;}
+.keyboardNote {grid-row:3;grid-column:3 / 8;align-self:center;margin:0 0 0 8px;font-size:11px;color:#8eb3bd;line-height:1.35;}
+.headerActions button:disabled {opacity:.45;cursor:not-allowed;}
 .viewer:has(.swimPad) .help {max-width:calc(100% - 390px);flex-wrap:wrap;}
 @media(max-width:760px) {.swimPad {right:12px;bottom:12px;}.viewer:has(.swimPad) .panel {bottom:260px;max-height:calc(100dvh - 405px);overflow-y:auto;}.viewer:has(.swimPad) .touchHint {display:none;}}
 .headerActions button.modeButton { width: auto; min-width: 82px; padding: 0 10px; }
