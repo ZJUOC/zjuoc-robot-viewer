@@ -4,7 +4,7 @@ import { OBB } from 'three/examples/jsm/math/OBB.js';
 /** Solid frame boxes and an oriented safety envelope enclosing the entire robot.
  * Substeps include rotation, so turning in place cannot cut through a post.
  */
-export function createCourseCollision(robot:T.Object3D,solids:T.Mesh[],units:number) {
+export function createCourseCollision(robot:T.Object3D,solids:T.Mesh[],units:number,extraBlocked:(p:T.Vector3,q:T.Quaternion)=>boolean=()=>false) {
   const savedPosition=robot.position.clone(),savedRotation=robot.quaternion.clone();
   robot.position.set(0,0,0);robot.quaternion.identity();
   const bounds=new T.Box3();
@@ -27,7 +27,7 @@ export function createCourseCollision(robot:T.Object3D,solids:T.Mesh[],units:num
   const position=new T.Vector3(),rotation=new T.Quaternion();
   const intersects=(p:T.Vector3,q:T.Quaternion)=>{
     matrix.compose(p,q,scale);probe.copy(local).applyMatrix4(matrix);
-    return obstacles.some(o=>probe.intersectsOBB(o));
+    return obstacles.some(o=>probe.intersectsOBB(o))||extraBlocked(p,q);
   };
   const resolve=(from:T.Vector3,fromRotation:T.Quaternion,to:T.Vector3,toRotation:T.Quaternion)=>{
     const steps=Math.max(1,Math.ceil(from.distanceTo(to)/(.01*units)),Math.ceil(fromRotation.angleTo(toRotation)/(Math.PI/180)));
@@ -44,5 +44,11 @@ export function createCourseCollision(robot:T.Object3D,solids:T.Mesh[],units:num
     toRotation.copy(rotation);
     return fraction;
   };
-  return {resolve,intersects,bounds};
+  const rebound=(p:T.Vector3,q:T.Quaternion,velocity:T.Vector3,limits:T.Box3)=>{
+    if(velocity.lengthSq()<1e-8)return;
+    const target=p.clone().addScaledVector(velocity,-.04*units/velocity.length()).clamp(limits.min,limits.max);
+    resolve(p.clone(),q.clone(),target,q.clone());
+    p.copy(target);
+  };
+  return {resolve,intersects,bounds,rebound};
 }

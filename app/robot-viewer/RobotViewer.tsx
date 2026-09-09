@@ -25,16 +25,19 @@ import { thrusterCommand } from "./ThrusterCommand";
 import { updateFollowCamera } from "./FollowCamera";
 import { createRaceCourse } from "./RaceCourse";
 import { createCourseCollision } from "./CourseCollision";
+import { createBallInteraction } from "./BallInteraction";
 import styles from "./robot-viewer.module.css";
 
 type Telemetry = { position:number[]; speed:number[] };
 
 // The reference-derived assembly lives in DetailedRobot.ts.
 
-function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Telemetry)=>void; motionMode:boolean; onInput:(keys:string[])=>void }) {
+function Scene({ onTelemetry, motionMode, onInput, delayEnabled, onBallHint }: { onTelemetry:(value:Telemetry)=>void; motionMode:boolean; onInput:(keys:string[])=>void; delayEnabled:boolean; onBallHint:(hint:string)=>void }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const motionRef=useRef(motionMode);
   useEffect(()=>{motionRef.current=motionMode;},[motionMode]);
+  const delayRef=useRef(delayEnabled);
+  useEffect(()=>{delayRef.current=delayEnabled;},[delayEnabled]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -109,6 +112,7 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
     const bodyBounds=new THREE.Box3().setFromObject(robot);
     const tiltMargin=clearance*Math.sin(THREE.MathUtils.degToRad(10))+.0045*unitsPerMeter;
     const minY=pool.bottom-bodyBounds.min.y+.3+tiltMargin,maxY=pool.top-bodyBounds.max.y-.3-tiltMargin;
+    const movementLimits=new THREE.Box3(new THREE.Vector3(-limitX,minY,-limitZ),new THREE.Vector3(limitX,maxY,limitZ));
     const course=createRaceCourse(unitsPerMeter,pool.bottom);
     scene.add(course.group);
     robot.position.copy(course.start);
@@ -117,7 +121,8 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
     const pivots:THREE.Object3D[]=[];
     robot.traverse(o=>{if(o.userData.motionPivot)pivots.push(o);});
     scene.add(robot);
-    const collision=createCourseCollision(robot,course.colliders,unitsPerMeter);
+    const ballInteraction=createBallInteraction(course.balls,robot,unitsPerMeter,pool.bottom,course.colliders);
+    const collision=createCourseCollision(robot,course.colliders,unitsPerMeter,ballInteraction.blocksPose);
     const previousRotation=robot.quaternion.clone(),collisionCorrection=new THREE.Vector3();
     const thrusterEffects=createThrusterEffects(pivots,window.innerWidth<700);
     scene.add(thrusterEffects.points);
@@ -132,11 +137,12 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
       if(rawKeys.has(code)===down)return;
       if(down)rawKeys.add(code);else rawKeys.delete(code);
       onInput([...rawKeys]);
-      pendingInputs.push({at:performance.now()+1000,keys:[...rawKeys]});
+      pendingInputs.push({at:performance.now()+(delayRef.current?1000:0),keys:[...rawKeys]});
     };
     let yawVelocity=0;
     let heading=Math.PI;
     let wasMotion=false;
+    let wasDelayed=delayRef.current;
     let followZoom=1,lastFollowDistance=0;
     const displayOffset=camera.position.clone().sub(robot.position),displayTarget=new THREE.Vector3(),followCenter=new THREE.Vector3();
     const follow=()=>{
@@ -157,6 +163,7 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
     const velocity=new THREE.Vector3(),forward=new THREE.Vector3(),right=new THREE.Vector3(),desired=new THREE.Vector3(),displacement=new THREE.Vector3();
     const clearKeys=()=>{keys.clear();if(rawKeys.size){rawKeys.clear();onInput([]);}pendingInputs.length=0;};
     const returnToStart=()=>{
+      ballInteraction.reset();
       clearKeys();velocity.set(0,0,0);desired.set(0,0,0);yawVelocity=0;
       heading=Math.PI;swayStrength=0;previousHeave=0;
       lean.identity();targetLean.identity();swayRotation.identity();
@@ -173,17 +180,19 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
       onTelemetry({position:[(robot.position.x+pool.width/2)/unitsPerMeter,(pool.length/2-robot.position.z)/unitsPerMeter,(robot.position.y-pool.bottom)/unitsPerMeter],speed:[0,0,0]});
     };
     const keyboard=(event:KeyboardEvent)=>{
-      if(!['KeyP','KeyW','KeyA','KeyS','KeyD','KeyJ','KeyK','Space','ShiftLeft','ShiftRight'].includes(event.code))return;
-      if(event.type==='keyup'){if(event.code!=='KeyP')queueInput(event.code,false);return;}
+      if(!['KeyL','KeyP','KeyW','KeyA','KeyS','KeyD','KeyJ','KeyK','Space','ShiftLeft','ShiftRight'].includes(event.code))return;
+      if(event.type==='keyup'){if(!['KeyP','KeyL'].includes(event.code))queueInput(event.code,false);return;}
       const el=event.target as HTMLElement;
       if(el?.closest('input,textarea,select,[contenteditable="true"]')||event.metaKey||event.ctrlKey||event.altKey)return;
       if(event.repeat)return;
       if(event.code==='KeyP'){event.preventDefault();returnToStart();return;}
+      if(event.code==='KeyL'){event.preventDefault();if(motionRef.current)ballInteraction.interact();return;}
       if(motionRef.current){event.preventDefault();queueInput(event.code,true);}
     };
     const touchInput=(event:Event)=>{
       const {code,down}=(event as CustomEvent<{code:string;down:boolean}>).detail;
       if(code==='KeyP'){if(down)returnToStart();return;}
+      if(code==='KeyL'){if(down&&motionRef.current)ballInteraction.interact();return;}
       if(down&&motionRef.current)queueInput(code,true);else queueInput(code,false);
     };
     window.addEventListener('keydown',keyboard);window.addEventListener('keyup',keyboard);
@@ -274,6 +283,12 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
       // The camera follows travel, not the small wave oscillations.
       robot.position.y-=previousHeave;
       const inputTime=performance.now();
+      if(wasDelayed!==delayRef.current){
+        pendingInputs.length=0;keys.clear();
+        if(delayRef.current)pendingInputs.push({at:inputTime+1000,keys:[...rawKeys]});
+        else rawKeys.forEach(code=>keys.add(code));
+        wasDelayed=delayRef.current;
+      }
       while(pendingInputs.length&&pendingInputs[0].at<=inputTime){
         const input=pendingInputs.shift()!;keys.clear();input.keys.forEach(code=>keys.add(code));
       }
@@ -320,6 +335,7 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
       if(fraction<1){
         const delta=THREE.MathUtils.euclideanModulo(heading-previousHeading+Math.PI,Math.PI*2)-Math.PI;
         heading=previousHeading+delta*fraction;
+        collision.rebound(robot.position,robot.quaternion,velocity,movementLimits);
         velocity.set(0,0,0);yawVelocity=0;previousHeave=0;
         collisionCorrection.subVectors(robot.position,collisionCorrection);
         key.position.add(collisionCorrection);rim.position.add(collisionCorrection);
@@ -343,10 +359,12 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
       });
       robot.updateMatrixWorld(true);
       thrusterEffects.update(dt,powers);
+      ballInteraction.update(dt);
       if(dt>0)measuredVelocity.subVectors(robot.position,previousPosition).divideScalar(dt*unitsPerMeter);
       previousPosition.copy(robot.position);
       if(elapsed-lastTelemetryTime>=.1){
         lastTelemetryTime=elapsed;
+        onBallHint(ballInteraction.hint());
         onTelemetry({position:[(robot.position.x+pool.width/2)/unitsPerMeter,(pool.length/2-robot.position.z)/unitsPerMeter,(robot.position.y-pool.bottom)/unitsPerMeter],speed:[measuredVelocity.x,-measuredVelocity.z,measuredVelocity.y]});
       }
       bubbles.position.y = (elapsed * 0.09) % 3;
@@ -391,7 +409,7 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
       });
       mount.removeChild(renderer.domElement);
     };
-  }, [onTelemetry,onInput]);
+  }, [onTelemetry,onInput,onBallHint]);
 
   return <div ref={mountRef} className={styles.canvas} />;
 }
@@ -399,6 +417,8 @@ function Scene({ onTelemetry, motionMode, onInput }: { onTelemetry:(value:Teleme
 export function RobotViewer() {
   const [pressed,setPressed]=useState<string[]>([]);
   const [motionMode,setMotionMode]=useState(false);
+  const [delayEnabled,setDelayEnabled]=useState(true);
+  const [ballHint,setBallHint]=useState('前往小球上方，靠近后按 L 吸附');
   const [panelVisible, setPanelVisible] = useState(false);
   const [telemetry,setTelemetry]=useState<Telemetry>({position:[1.5,2.5,.75],speed:[0,0,0]});
   const panelRef = useRef<HTMLDivElement>(null);
@@ -422,13 +442,14 @@ export function RobotViewer() {
 
   return (
     <main className={styles.viewer}>
-      <Scene onTelemetry={setTelemetry} motionMode={motionMode} onInput={setPressed} />
+      <Scene onTelemetry={setTelemetry} motionMode={motionMode} onInput={setPressed} delayEnabled={delayEnabled} onBallHint={setBallHint} />
       <header className={styles.header}>
         <div className={styles.identity}>
           <span className={styles.logo}><CornersOut size={22} weight="bold" /></span>
           <div><strong>水下机器人</strong><small>三视图重建 · 装配模型 02</small></div>
         </div>
         <div className={styles.headerActions}>
+          <button type="button" aria-pressed={delayEnabled} onClick={()=>setDelayEnabled(v=>!v)}>{delayEnabled?'1 秒延迟：开':'1 秒延迟：关'}</button>
           <button className={styles.modeButton} type="button" disabled={motionMode} title={motionMode?'展示模式可查看全景':'查看水池全景'} onClick={()=>window.dispatchEvent(new Event('robot-pool-view'))}>水池全景</button>
           <button className={styles.modeButton} type="button" aria-pressed={motionMode} onClick={()=>setMotionMode(v=>!v)}>
             {motionMode?'运动模式':'展示模式'}
@@ -442,8 +463,8 @@ export function RobotViewer() {
         </div>
       </header>
 
-      <div className={styles.status}><i /> 水下场景 <span>{motionMode?'跟随视角 · 延迟 1 秒 · Space 上 / Shift 下 · J/K 转向':'展示模式 · 自由视角'}</span></div>
-      {motionMode&&<ControlKeyboard pressed={pressed} />}
+      <div className={styles.status}><i /> 水下场景 <span>{motionMode?`跟随视角 · ${delayEnabled?'延迟 1 秒':'无操作延迟'} · Space 上 / Shift 下 · J/K 转向`:'展示模式 · 自由视角'}</span></div>
+      {motionMode&&<ControlKeyboard pressed={pressed} delayEnabled={delayEnabled} ballHint={ballHint} />}
 
       {panelVisible && (
         <section ref={panelRef} className={styles.panel} aria-label="机器人实时位置与速度">

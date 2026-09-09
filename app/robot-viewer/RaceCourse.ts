@@ -1,7 +1,7 @@
 import * as T from 'three';
 
 // Metres in pool coordinates: X right, Y towards far end, Z above the floor.
-export const COURSE={start:[.58,.75],gates:[[.58,1.45],[.94,2.75],[.58,3.95]],ball:[.58,4.55]} as const;
+export const COURSE={start:[.58,.75],gates:[[.58,1.45],[.94,2.75],[.58,3.75]],ball:[.58,4.55]} as const;
 // Clear opening dimensions, not the outside dimensions of the frame (metres).
 export const GATE_SPECS=[
   {width:.82,bottom:.80,height:.47,angle:0},
@@ -32,15 +32,20 @@ export function createRaceCourse(units:number,bottom:number) {
     const texture=new T.CanvasTexture(canvas);texture.colorSpace=T.SRGBColorSpace;textures.push(texture);
     return new T.MeshBasicMaterial({map:texture,side:T.DoubleSide});
   }
-  for(const [index,[x,y]] of COURSE.gates.entries()) {
+  const colors=[0xf04c52,0xffda35,0x328cff];
+  const names=['红','黄','蓝'];
+  const positions=COURSE.gates;
+  for(const [index,[x,y]] of positions.entries()) {
     const gate=new T.Group();gate.name=`赛道门 ${index+1}`;gate.position.copy(point(x,y,0));group.add(gate);
-    const spec=GATE_SPECS[index],half=spec.width/2+.03,top=spec.bottom+spec.height;
+    const spec=index<3?GATE_SPECS[index]:{width:.82,bottom:.25,height:.7,angle:0},half=spec.width/2+.03,top=spec.bottom+spec.height;
+    const frameMaterial=index<3?orange:new T.MeshStandardMaterial({color:colors[index-3],roughness:.36,metalness:.2});
+    if(index>=3)gate.name=`${names[index-3]}色框`;
     gate.rotation.y=spec.angle;
     gate.userData={openingWidthM:spec.width,openingHeightM:spec.height};
     // Two weighted feet, square-section posts and an unobstructed opening.
     for(const side of [-1,1]){
       box([.14,.075,.30],[side*half,.0375,0],navy,gate);
-      box([.06,top-.015,.08],[side*half,(top+.135)/2,0],orange,gate);
+      box([.06,top-.015,.08],[side*half,(top+.135)/2,0],frameMaterial,gate);
       box([.075,.04,.09],[side*half,spec.bottom+.08,0],white,gate);
       box([.075,.04,.09],[side*half,top-.08,0],white,gate);
       for(const dz of [-.12,.12]){
@@ -48,15 +53,40 @@ export function createRaceCourse(units:number,bottom:number) {
         bolt.position.set(side*half*units,.083*units,dz*units);gate.add(bolt);
       }
     }
-    box([spec.width+.12,.06,.08],[0,spec.bottom-.03,0],orange,gate);
-    box([spec.width+.12,.06,.08],[0,top+.03,0],orange,gate);
+    box([spec.width+.12,.06,.08],[0,spec.bottom-.03,0],frameMaterial,gate);
+    box([spec.width+.12,.06,.08],[0,top+.03,0],frameMaterial,gate);
     // Number mounted on the beam: no tall sign above the opening.
     box([.18,.12,.045],[0,top+.04,0],navy,gate);
-    const sign=new T.Mesh(new T.PlaneGeometry(.17*units,.11*units),label(String(index+1),.17,.11));
+    const sign=new T.Mesh(new T.PlaneGeometry(.17*units,.11*units),label(index<3?String(index+1):names[index-3],.17,.11));
     sign.position.set(0,(top+.04)*units,.041*units);gate.add(sign);
     // Duplicate printed face so the number reads correctly from either direction.
     const back=sign.clone();back.position.z=-.041*units;back.rotation.y=Math.PI;gate.add(back);
   }
+  // Open-top cylindrical ball baskets. Segmented walls use the same solid
+  // boxes as their collision shapes, leaving a genuinely hollow interior.
+  colors.forEach((color,i)=>{
+    const basket=new T.Group();basket.name=`${names[i]}色圆筒收球框`;
+    basket.position.copy(point(2.25,1.2+i*1.3,0));group.add(basket);
+    basket.userData={innerDiameterM:.45,heightM:.45};
+    const rail=new T.MeshStandardMaterial({color,roughness:.35,metalness:.25});
+    const wall=new T.MeshStandardMaterial({color,transparent:true,opacity:.28,roughness:.5,depthWrite:false});
+    box([.54,.05,.54],[0,.025,0],navy,basket);
+    const segments=32,r=.24;
+    for(let j=0;j<segments;j++){
+      const a=j*Math.PI*2/segments;
+      const panel=box([2*r*Math.tan(Math.PI/segments)+.002,.4,.03],[r*Math.sin(a),.25,r*Math.cos(a)],wall,basket);
+      panel.rotation.y=a;
+      if(j%4===0){
+        const post=box([.02,.4,.035],[r*Math.sin(a),.25,r*Math.cos(a)],rail,basket);post.rotation.y=a;
+      }
+    }
+    for(const h of [.06,.45]){
+      const ring=new T.Mesh(new T.TorusGeometry(r*units,.015*units,8,64),rail);
+      ring.rotation.x=Math.PI/2;ring.position.y=h*units;basket.add(ring);
+    }
+    const sign=new T.Mesh(new T.PlaneGeometry(.17*units,.10*units),label(names[i],.17,.10));
+    sign.position.set(0,.27*units,.26*units);basket.add(sign);
+  });
   const waypoints=[COURSE.start,...COURSE.gates,COURSE.ball].map(([x,y])=>point(x,y,.018));
   const path=new T.CatmullRomCurve3(waypoints,false,'centripetal');
   const line=new T.Mesh(new T.TubeGeometry(path,160,.013*units,6,false),orange);group.add(line);
@@ -70,12 +100,15 @@ export function createRaceCourse(units:number,bottom:number) {
   }
   floorLabel('START',COURSE.start[0],COURSE.start[1]-.2,.5,.19);
   floorLabel('BALL',COURSE.ball[0],COURSE.ball[1]+.23,.4,.16);
+  const balls=colors.map((color,i)=>{
   const stand=new T.Mesh(new T.CylinderGeometry(.16*units,.19*units,.06*units,40),navy);
-  stand.position.copy(point(...COURSE.ball,.03));group.add(stand);
-  const ball=new T.Mesh(new T.SphereGeometry(.09*units,32,24),new T.MeshStandardMaterial({color:0xffdf3d,roughness:.22,metalness:.06}));
-  ball.name='目标球';ball.position.copy(point(...COURSE.ball,.15));ball.castShadow=true;group.add(ball);
+  stand.position.copy(point(.32+i*.4,4.55,.03));group.add(stand);
+  const ball=new T.Mesh(new T.SphereGeometry(.09*units,32,24),new T.MeshStandardMaterial({color,roughness:.22,metalness:.06}));
+  ball.name=`${names[i]}色球`;ball.position.copy(point(.32+i*.4,4.55,.15));ball.castShadow=true;group.add(ball);
   const band=new T.Mesh(new T.TorusGeometry(.091*units,.007*units,8,40),white);
-  band.rotation.x=Math.PI/2;band.position.copy(ball.position);group.add(band);
+  band.rotation.x=Math.PI/2;ball.add(band);
+  return ball;
+  });
   group.updateMatrixWorld(true);
-  return {group,colliders,start:point(...COURSE.start,.75),dispose:()=>textures.forEach(t=>t.dispose())};
+  return {group,colliders,balls,start:point(...COURSE.start,.75),dispose:()=>textures.forEach(t=>t.dispose())};
 }
