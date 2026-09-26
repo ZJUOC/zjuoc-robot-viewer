@@ -32,7 +32,7 @@ type Telemetry = { position:number[]; speed:number[] };
 
 // The reference-derived assembly lives in DetailedRobot.ts.
 
-function Scene({ onTelemetry, motionMode, onInput, delayEnabled, onBallHint }: { onTelemetry:(value:Telemetry)=>void; motionMode:boolean; onInput:(keys:string[])=>void; delayEnabled:boolean; onBallHint:(hint:string)=>void }) {
+function Scene({ onTelemetry, motionMode, onInput, delayEnabled, onBallHint, onGamepadStatus }: { onTelemetry:(value:Telemetry)=>void; motionMode:boolean; onInput:(keys:string[])=>void; delayEnabled:boolean; onBallHint:(hint:string)=>void; onGamepadStatus:(connected:boolean)=>void }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const motionRef=useRef(motionMode);
   useEffect(()=>{motionRef.current=motionMode;},[motionMode]);
@@ -121,7 +121,7 @@ function Scene({ onTelemetry, motionMode, onInput, delayEnabled, onBallHint }: {
     const pivots:THREE.Object3D[]=[];
     robot.traverse(o=>{if(o.userData.motionPivot)pivots.push(o);});
     scene.add(robot);
-    const ballInteraction=createBallInteraction(course.balls,robot,unitsPerMeter,pool.bottom,course.colliders);
+    const ballInteraction=createBallInteraction(course.balls,robot,unitsPerMeter,pool.bottom,course.colliders,course.baskets);
     const collision=createCourseCollision(robot,course.colliders,unitsPerMeter,ballInteraction.blocksPose);
     const previousRotation=robot.quaternion.clone(),collisionCorrection=new THREE.Vector3();
     const thrusterEffects=createThrusterEffects(pivots,window.innerWidth<700);
@@ -133,6 +133,8 @@ function Scene({ onTelemetry, motionMode, onInput, delayEnabled, onBallHint }: {
     const keys=new Set<string>();
     const rawKeys=new Set<string>();
     const pendingInputs:{at:number;keys:string[]}[]=[];
+    const mappedGamepadKeys=new Set<string>();
+    const previousGamepadActions=new Set<string>();
     const queueInput=(code:string,down:boolean)=>{
       if(rawKeys.has(code)===down)return;
       if(down)rawKeys.add(code);else rawKeys.delete(code);
@@ -161,9 +163,9 @@ function Scene({ onTelemetry, motionMode, onInput, delayEnabled, onBallHint }: {
     const swayRotation=new THREE.Quaternion(),swayEuler=new THREE.Euler(0,0,0,'XYZ');
     let swayStrength=0,previousHeave=0;
     const velocity=new THREE.Vector3(),forward=new THREE.Vector3(),right=new THREE.Vector3(),desired=new THREE.Vector3(),displacement=new THREE.Vector3();
-    const clearKeys=()=>{keys.clear();if(rawKeys.size){rawKeys.clear();onInput([]);}pendingInputs.length=0;};
-    const returnToStart=()=>{
-      ballInteraction.reset();
+    const clearKeys=()=>{keys.clear();mappedGamepadKeys.clear();if(rawKeys.size){rawKeys.clear();onInput([]);}pendingInputs.length=0;};
+    const returnToStart=(resetAll=false)=>{
+      ballInteraction.reset(resetAll);
       clearKeys();velocity.set(0,0,0);desired.set(0,0,0);yawVelocity=0;
       heading=Math.PI;swayStrength=0;previousHeave=0;
       lean.identity();targetLean.identity();swayRotation.identity();
@@ -180,18 +182,20 @@ function Scene({ onTelemetry, motionMode, onInput, delayEnabled, onBallHint }: {
       onTelemetry({position:[(robot.position.x+pool.width/2)/unitsPerMeter,(pool.length/2-robot.position.z)/unitsPerMeter,(robot.position.y-pool.bottom)/unitsPerMeter],speed:[0,0,0]});
     };
     const keyboard=(event:KeyboardEvent)=>{
-      if(!['KeyL','KeyP','KeyW','KeyA','KeyS','KeyD','KeyJ','KeyK','Space','ShiftLeft','ShiftRight'].includes(event.code))return;
-      if(event.type==='keyup'){if(!['KeyP','KeyL'].includes(event.code))queueInput(event.code,false);return;}
+      if(!['KeyL','KeyP','KeyO','KeyW','KeyA','KeyS','KeyD','KeyJ','KeyK','Space','ShiftLeft','ShiftRight'].includes(event.code))return;
+      if(event.type==='keyup'){if(!['KeyP','KeyL','KeyO'].includes(event.code))queueInput(event.code,false);return;}
       const el=event.target as HTMLElement;
       if(el?.closest('input,textarea,select,[contenteditable="true"]')||event.metaKey||event.ctrlKey||event.altKey)return;
       if(event.repeat)return;
       if(event.code==='KeyP'){event.preventDefault();returnToStart();return;}
+      if(event.code==='KeyO'){event.preventDefault();returnToStart(true);return;}
       if(event.code==='KeyL'){event.preventDefault();if(motionRef.current)ballInteraction.interact();return;}
       if(motionRef.current){event.preventDefault();queueInput(event.code,true);}
     };
     const touchInput=(event:Event)=>{
       const {code,down}=(event as CustomEvent<{code:string;down:boolean}>).detail;
       if(code==='KeyP'){if(down)returnToStart();return;}
+      if(code==='KeyO'){if(down)returnToStart(true);return;}
       if(code==='KeyL'){if(down&&motionRef.current)ballInteraction.interact();return;}
       if(down&&motionRef.current)queueInput(code,true);else queueInput(code,false);
     };
@@ -257,12 +261,34 @@ function Scene({ onTelemetry, motionMode, onInput, delayEnabled, onBallHint }: {
     let frame = 0;
     const clock = new THREE.Clock();
     let previousTime=0;
+    let lastGamepadStatusTime=0;
     const animate = () => {
       frame = requestAnimationFrame(animate);
       const elapsed = clock.getElapsedTime();
       const dt=Math.min(elapsed-previousTime,.05);
       const step=dt*Math.PI/1.5;
       previousTime=elapsed;
+      const gamepads=typeof navigator.getGamepads==='function'?navigator.getGamepads():[];
+      const gamepad=Array.from(gamepads).find((pad):pad is Gamepad=>Boolean(pad?.connected));
+      if(elapsed-lastGamepadStatusTime>=.5){onGamepadStatus(Boolean(gamepad));lastGamepadStatusTime=elapsed;}
+      const nextGamepadKeys=new Set<string>();
+      const active=(index:number)=>Boolean(gamepad?.buttons[index]?.pressed||((gamepad?.buttons[index]?.value??0)>.35));
+      const axis=(index:number)=>gamepad?.axes[index]??0;
+      if(gamepad&&motionRef.current){
+        if(axis(0)<-.22)nextGamepadKeys.add('KeyA');if(axis(0)>.22)nextGamepadKeys.add('KeyD');
+        if(axis(1)<-.22)nextGamepadKeys.add('KeyW');if(axis(1)>.22)nextGamepadKeys.add('KeyS');
+        if(axis(2)<-.22)nextGamepadKeys.add('KeyJ');if(axis(2)>.22)nextGamepadKeys.add('KeyK');
+        if(active(6))nextGamepadKeys.add('ShiftLeft');if(active(7))nextGamepadKeys.add('Space');
+      }
+      mappedGamepadKeys.forEach(code=>{if(!nextGamepadKeys.has(code))queueInput(code,false);});
+      nextGamepadKeys.forEach(code=>{if(!mappedGamepadKeys.has(code))queueInput(code,true);});
+      mappedGamepadKeys.clear();nextGamepadKeys.forEach(code=>mappedGamepadKeys.add(code));
+      const actions=new Set<string>();
+      if(gamepad){if(active(5))actions.add('grab');if(active(4))actions.add('position-reset');if(active(3))actions.add('full-reset');}
+      if(actions.has('grab')&&!previousGamepadActions.has('grab')&&motionRef.current)ballInteraction.interact();
+      if(actions.has('position-reset')&&!previousGamepadActions.has('position-reset'))returnToStart();
+      if(actions.has('full-reset')&&!previousGamepadActions.has('full-reset'))returnToStart(true);
+      previousGamepadActions.clear();actions.forEach(action=>previousGamepadActions.add(action));
       previousRotation.copy(robot.quaternion);
       const previousHeading=heading;
       if(wasMotion!==motionRef.current){
@@ -419,6 +445,7 @@ export function RobotViewer() {
   const [motionMode,setMotionMode]=useState(false);
   const [delayEnabled,setDelayEnabled]=useState(true);
   const [ballHint,setBallHint]=useState('前往小球上方，靠近后按 L 吸附');
+  const [gamepadConnected,setGamepadConnected]=useState(false);
   const [panelVisible, setPanelVisible] = useState(false);
   const [telemetry,setTelemetry]=useState<Telemetry>({position:[1.5,2.5,.75],speed:[0,0,0]});
   const panelRef = useRef<HTMLDivElement>(null);
@@ -442,7 +469,7 @@ export function RobotViewer() {
 
   return (
     <main className={styles.viewer}>
-      <Scene onTelemetry={setTelemetry} motionMode={motionMode} onInput={setPressed} delayEnabled={delayEnabled} onBallHint={setBallHint} />
+      <Scene onTelemetry={setTelemetry} motionMode={motionMode} onInput={setPressed} delayEnabled={delayEnabled} onBallHint={setBallHint} onGamepadStatus={setGamepadConnected} />
       <header className={styles.header}>
         <div className={styles.identity}>
           <span className={styles.logo}><CornersOut size={22} weight="bold" /></span>
@@ -463,7 +490,7 @@ export function RobotViewer() {
         </div>
       </header>
 
-      <div className={styles.status}><i /> 水下场景 <span>{motionMode?`跟随视角 · ${delayEnabled?'延迟 1 秒':'无操作延迟'} · Space 上 / Shift 下 · J/K 转向`:'展示模式 · 自由视角'}</span></div>
+      <div className={styles.status}><i /> 水下场景 <span>{motionMode?`跟随视角 · ${delayEnabled?'延迟 1 秒':'无操作延迟'} · Space 上 / Shift 下 · J/K 转向`:'展示模式 · 自由视角'} · 手柄{gamepadConnected?'已连接':'未连接'}</span></div>
       {motionMode&&<ControlKeyboard pressed={pressed} delayEnabled={delayEnabled} ballHint={ballHint} />}
 
       {panelVisible && (

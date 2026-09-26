@@ -34,6 +34,7 @@ export function createRaceCourse(units:number,bottom:number) {
   }
   const colors=[0xf04c52,0xffda35,0x328cff];
   const names=['红','黄','蓝'];
+  const baskets:{colorIndex:number;center:T.Vector3;innerRadius:number;floorY:number;openingY:number}[]=[];
   const positions=COURSE.gates;
   for(const [index,[x,y]] of positions.entries()) {
     const gate=new T.Group();gate.name=`赛道门 ${index+1}`;gate.position.copy(point(x,y,0));group.add(gate);
@@ -68,6 +69,7 @@ export function createRaceCourse(units:number,bottom:number) {
     const basket=new T.Group();basket.name=`${names[i]}色圆筒收球框`;
     basket.position.copy(point(2.25,1.2+i*1.3,0));group.add(basket);
     basket.userData={innerDiameterM:.45,heightM:.45};
+    baskets.push({colorIndex:i,center:basket.position.clone(),innerRadius:.225*units,floorY:bottom+.05*units,openingY:bottom+.45*units});
     const rail=new T.MeshStandardMaterial({color,roughness:.35,metalness:.25});
     const wall=new T.MeshStandardMaterial({color,transparent:true,opacity:.28,roughness:.5,depthWrite:false});
     box([.54,.05,.54],[0,.025,0],navy,basket);
@@ -110,5 +112,5 @@ export function createRaceCourse(units:number,bottom:number) {
   return ball;
   });
   group.updateMatrixWorld(true);
-  return {group,colliders,balls,start:point(...COURSE.start,.75),dispose:()=>textures.forEach(t=>t.dispose())};
+  return {group,colliders,balls,baskets,start:point(...COURSE.start,.75),dispose:()=>textures.forEach(t=>t.dispose())};
 }

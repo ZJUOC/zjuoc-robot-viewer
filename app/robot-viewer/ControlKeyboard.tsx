@@ -2,7 +2,8 @@ import styles from './robot-viewer.module.css';
 
 const controls=[
   {code:'KeyW',key:'W',label:'前进',row:1,col:'3'},
-  {code:'KeyP',key:'P',label:'脱困',row:1,col:'7'},
+  {code:'KeyP',key:'P',label:'复位位置',row:1,col:'7'},
+  {code:'KeyO',key:'O',label:'完整重置',row:1,col:'8'},
   {code:'KeyL',key:'L',label:'吸取/放下',row:1,col:'6'},
   {code:'KeyA',key:'A',label:'左移',row:2,col:'2'},
   {code:'KeyS',key:'S',label:'后退',row:2,col:'3'},
@@ -28,7 +29,7 @@ export function ControlKeyboard({pressed,delayEnabled,ballHint}:{pressed:string[
           onKeyUp={e=>{if(e.code==='Enter'){e.preventDefault();send(c.code,false);}}}
           onBlur={()=>send(c.code,false)}><strong>{c.key}</strong><small>{c.label}</small></button>;
       })}
-      <p className={styles.keyboardNote}>P 立即回到起点，不受延迟影响<br/>{delayEnabled?'其余按键松开后仍有 1 秒延迟':'按键即时响应，保留运动惯性'}</p>
+      <p className={styles.keyboardNote}>P / 手柄 LB 回到起点；O / 手柄 Y 重置全部进程<br/>{delayEnabled?'其余按键松开后仍有 1 秒延迟':'按键即时响应，保留运动惯性'}</p>
     </div>
   </section>;
 }

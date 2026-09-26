@@ -130,13 +130,13 @@
 .swimPad {position:absolute;z-index:6;right:20px;bottom:22px;width:min(340px,calc(100% - 24px));padding:9px;border:1px solid #416671;border-radius:10px;background:#061e2ded;backdrop-filter:blur(12px);}
 .keyboardHeading {display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:14px;color:#ddf7f8;}
 .keyboardHeading small {font-size:12px;color:#92b7c0;}
-.keyboardKeys {display:grid;grid-template-columns:repeat(7,minmax(0,1fr));grid-template-rows:repeat(4,36px);gap:4px;}
+.keyboardKeys {display:grid;grid-template-columns:repeat(8,minmax(0,1fr));grid-template-rows:repeat(4,36px);gap:4px;}
 .swimPad button {min-width:0;border:1px solid #59929b;border-bottom-width:3px;border-radius:6px;background:#153647;color:#e0f5f7;touch-action:none;cursor:pointer;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:1px;}
 .swimPad button strong {font:600 14px ui-monospace,monospace;}
 .swimPad button small {font-size:11px;color:#99bdc7;}
 .swimPad button[aria-pressed="true"] {background:#70f1ec;color:#062932;border-color:#c1fffa;box-shadow:0 0 14px #70f1ec55;transform:translateY(1px);}
 .swimPad button[aria-pressed="true"] small {color:#174c54;}
-.keyboardNote {grid-row:3;grid-column:3 / 8;align-self:center;margin:0 0 0 8px;font-size:11px;color:#8eb3bd;line-height:1.35;}
+.keyboardNote {grid-row:3;grid-column:3 / 9;align-self:center;margin:0 0 0 8px;font-size:11px;color:#8eb3bd;line-height:1.35;}
 .headerActions button:disabled {opacity:.45;cursor:not-allowed;}
 .viewer:has(.swimPad) .help {max-width:calc(100% - 390px);flex-wrap:wrap;}
 @media(max-width:760px) {.swimPad {right:12px;bottom:12px;}.viewer:has(.swimPad) .panel {bottom:260px;max-height:calc(100dvh - 405px);overflow-y:auto;}.viewer:has(.swimPad) .touchHint {display:none;}}
